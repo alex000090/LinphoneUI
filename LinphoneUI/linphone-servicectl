@@ -1,0 +1,104 @@
+#!/bin/bash
+SERVICE_NAME="LinphoneUI-daemon"
+SERVICE_FILE="$HOME/.config/systemd/user/$SERVICE_NAME.service"
+DBUS_CONFIG_DIR="/etc/dbus-1/system.d"
+DBUS_CONFIG_FILE="org.sailfishos.LinphoneUI.conf"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PYTHON_PATH="/usr/bin/python3"
+
+create_service_file() {
+    mkdir -p "$(dirname "$SERVICE_FILE")"
+    
+    cat > $SERVICE_FILE << EOF
+[Unit]
+Description=LinphoneUI Daemon Service
+After=dbus.socket pulseaudio.service
+Wants=pulseaudio.service
+
+[Service]
+Type=simple
+ExecStart=$PYTHON_PATH $SCRIPT_DIR/scripts/LinphoneUI-daemon.py
+Restart=always
+RestartSec=5
+Environment=PYTHONPATH=$SCRIPT_DIR/scripts
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u)
+WorkingDirectory=$SCRIPT_DIR/scripts
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+install_dbus_config() {
+    echo "Installing D-Bus configuration..."
+    sudo cp $SCRIPT_DIR/dbus/$DBUS_CONFIG_FILE $DBUS_CONFIG_DIR/
+    sudo systemctl reload dbus
+    echo "D-Bus configuration installed"
+}
+
+uninstall_dbus_config() {
+    echo "Removing D-Bus configuration..."
+    sudo rm -f $DBUS_CONFIG_DIR/$DBUS_CONFIG_FILE
+    sudo systemctl reload dbus
+    echo "D-Bus configuration removed"
+}
+
+case "$1" in
+    start)
+        if [ ! -f $SERVICE_FILE ]; then
+            create_service_file
+            systemctl --user daemon-reload
+        fi
+        systemctl --user start $SERVICE_NAME
+        echo "Service started"
+        ;;
+    stop)
+        systemctl --user stop $SERVICE_NAME
+        echo "Service stopped"
+        ;;
+    restart)
+        systemctl --user restart $SERVICE_NAME
+        echo "Service restarted"
+        ;;
+    enable)
+        if [ ! -f $SERVICE_FILE ]; then
+            create_service_file
+            systemctl --user daemon-reload
+        fi
+        install_dbus_config
+        systemctl --user enable $SERVICE_NAME
+        echo "Service added to autostart"
+        ;;
+    disable)
+        systemctl --user disable $SERVICE_NAME
+        echo "Service removed from autostart"
+        ;;
+    install)
+        install_dbus_config
+        create_service_file
+        systemctl --user daemon-reload
+        systemctl --user enable $SERVICE_NAME
+        systemctl --user start $SERVICE_NAME
+        echo "Service installed and started"
+        ;;
+    uninstall)
+        systemctl --user stop $SERVICE_NAME
+        systemctl --user disable $SERVICE_NAME
+        uninstall_dbus_config
+        rm -f $SERVICE_FILE
+        systemctl --user daemon-reload
+        echo "Service uninstalled"
+        ;;
+    status)
+        systemctl --user status $SERVICE_NAME
+        ;;
+    logs)
+        journalctl --user -u $SERVICE_NAME -f
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|enable|disable|install|uninstall|status|logs}"
+        exit 1
+        ;;
+esac
