@@ -57,7 +57,8 @@ class LinphoneDaemon:
             DBusGMainLoop(set_as_default=True)
             self.bus = dbus.SessionBus()
             self.bus_name = dbus.service.BusName('org.sailfishos.LinphoneUI', self.bus)
-            self.dbus_object = LinphoneDBusObject(self.bus, '/LinphoneUI')
+            # Pass self (daemon instance) to D-Bus object
+            self.dbus_object = LinphoneDBusObject(self.bus, '/LinphoneUI', self)
             self.logger.info("D-Bus service registered")
         except Exception as e:
             self.logger.error(f"D-Bus error: {e}")
@@ -83,7 +84,7 @@ class LinphoneDaemon:
             # Wait a bit for linphone to fully initialize
             time.sleep(3)
             
-            # Check initial status and force update
+            # Check initial status and force update WITH SIGNAL EMISSION
             self.check_and_update_registration_status(force_update=True)
             
         except subprocess.CalledProcessError as e:
@@ -101,8 +102,8 @@ class LinphoneDaemon:
             
             # Use invoker to launch Sailfish OS application
             subprocess.Popen([
-                'invoker', '--type=silica-qt5',
-                '/usr/share/harbour-linphone/qml/LinphoneUI.qml'
+                'invoker', '--type=silica-qt5', 'sailfish-qml',
+                'LinphoneUI'
             ])
             self.logger.info("GUI launch command sent")
             
@@ -148,13 +149,17 @@ class LinphoneDaemon:
         
         self.is_registered = self.parse_registration_status(reg_output)
         
+        self.logger.info(f"Registration check: was={was_registered}, now={self.is_registered}, output='{reg_output}'")
+        
         if self.is_registered:
             if not was_registered or force_update:
-                self.logger.info(f"? SIP registration: SUCCESS - {reg_output}")
+                self.logger.info(f"SIP registration: SUCCESS - {reg_output}")
+                # Send signal to GUI
                 self.dbus_object.emit_registration_state(True)
         else:
             if was_registered or force_update:
-                self.logger.info(f"? SIP registration: FAILED - {reg_output}")
+                self.logger.info(f"SIP registration: FAILED - {reg_output}")
+                # Send signal to GUI
                 self.dbus_object.emit_registration_state(False)
     
     def check_linphone_calls(self):
@@ -190,6 +195,7 @@ class LinphoneDaemon:
                     call_id = parts[0].strip()
                     call_info_str = parts[1].strip()
                     status = parts[2].strip()
+
                     
                     self.logger.debug(f"Call: ID={call_id}, Info={call_info_str}, Status={status}")
                     
@@ -201,11 +207,11 @@ class LinphoneDaemon:
                     
                     if status == "IncomingReceived":
                         call_info['call_type'] = 'incoming'
-                    elif status == "OutgoingInit":
+                    elif status == "OutgoingRinging":
                         call_info['call_type'] = 'outgoing'
-                    elif status == "Connected":
+                    elif status == "StreamsRunning":
                         call_info['call_type'] = 'active'
-                    
+                    else: continue
                     break
                     
         except Exception as e:
@@ -271,18 +277,27 @@ class LinphoneDaemon:
         # Setup audio
         self.setup_call_audio()
         
-        # Notify GUI
-        self.dbus_object.emit_call_state("incoming", self.current_call_number)
-    
+        # Notify GUI - передаем номер как строку
+        self.dbus_object.emit_call_state("incoming", str(number))
+
+    def handle_outgoing_call(self, number):
+        """Handle outgoing call initiation"""
+        self.logger.info(f"Outgoing call: {number}")
+        self.in_call = True
+        self.current_call_number = number
+        
+        # Notify GUI - передаем номер как строку
+        self.dbus_object.emit_call_state("outgoing", str(number))
+
     def handle_call_connected(self, number):
         """Handle connected call"""
         self.logger.info(f"Call connected: {number}")
         self.in_call = True
         self.current_call_number = number
         
-        # Notify GUI
-        self.dbus_object.emit_call_state("connected", self.current_call_number)
-    
+        # Notify GUI - передаем номер как строку
+        self.dbus_object.emit_call_state("connected", str(number))
+
     def handle_call_ended(self):
         """Handle call end"""
         self.logger.info("Call ended")
@@ -291,11 +306,12 @@ class LinphoneDaemon:
         # Restore audio
         self.restore_audio()
         
-        # Notify GUI
+        # Notify GUI - передаем пустую строку вместо false
         self.dbus_object.emit_call_state("ended", "")
         
         self.current_call_number = None
-    
+
+
     def monitor_linphone(self):
         """Main monitoring loop"""
         while self.running:
@@ -313,17 +329,25 @@ class LinphoneDaemon:
                 call_info = self.parse_linphone_calls(calls_output)
                 
                 # Handle call state changes
-                if call_info['has_call'] and not self.in_call:
-                    # New call detected
-                    self.in_call = True
-                    self.current_call_number = call_info['number']
-                    
-                    if call_info['call_type'] == 'incoming':
-                        self.handle_incoming_call(self.current_call_number)
+                if call_info['has_call']:
+                    if not self.in_call:
+                        # New call detected
+                        self.in_call = True
+                        self.current_call_number = call_info['number']
                         
-                    elif call_info['call_type'] in ['outgoing', 'active']:
-                        self.handle_call_connected(self.current_call_number)
-                
+                        if call_info['call_type'] == 'incoming':
+                            self.handle_incoming_call(self.current_call_number)
+                        elif call_info['call_type'] == 'outgoing':
+                            self.handle_outgoing_call(self.current_call_number)
+                        elif call_info['call_type'] == 'active':
+                            self.handle_call_connected(self.current_call_number)
+                    
+                    else:
+                        # Existing call changed state
+                        if call_info['call_type'] == 'active' and self.current_call_number:
+                            # Call became active
+                            self.handle_call_connected(self.current_call_number)
+                        
                 elif not call_info['has_call'] and self.in_call:
                     # Call ended
                     self.handle_call_ended()
@@ -331,7 +355,7 @@ class LinphoneDaemon:
             except Exception as e:
                 self.logger.error(f"Monitoring error: {e}")
             
-            time.sleep(3)
+            time.sleep(1)
     
     def shutdown(self):
         """Clean shutdown"""
@@ -346,17 +370,18 @@ class LinphoneDaemon:
 class LinphoneDBusObject(dbus.service.Object):
     """D-Bus object for GUI communication"""
     
-    def __init__(self, bus, object_path):
+    def __init__(self, bus, object_path, daemon):
         super().__init__(bus, object_path)
-    
-    @dbus.service.signal('org.sailfishos.LinphoneUI', signature='sb')
-    def call_state_changed(self, state, number):
-        """Signal for call state changes with number"""
-        pass
+        self.daemon = daemon
     
     @dbus.service.signal('org.sailfishos.LinphoneUI', signature='b')
     def registration_state_changed(self, registered):
         """Signal for registration state changes"""
+        pass
+    
+    @dbus.service.signal('org.sailfishos.LinphoneUI', signature='ss')
+    def call_state_changed(self, state, number):
+        """Signal for call state changes with number"""
         pass
     
     @dbus.service.method('org.sailfishos.LinphoneUI', in_signature='s', out_signature='b')
@@ -403,15 +428,121 @@ class LinphoneDBusObject(dbus.service.Object):
         except Exception as e:
             logging.getLogger('LinphoneDaemon').error(f"Answer error: {e}")
             return False
+
+
+    @dbus.service.method('org.sailfishos.LinphoneUI', in_signature='s', out_signature='b')
+    def make_call(self, number):
+        """Make call using linphonecsh"""
+        try:
+            self._log_call_action(f"Making call to {number}")
+            result = subprocess.run(
+                ['linphonecsh', 'dial', number], 
+                check=True, timeout=10, capture_output=True, text=True
+            )
+            self._log_call_action(f"Call result: {result.stdout}")
+            
+            # Notify about outgoing call initiation
+            import __main__ as main
+            if hasattr(main, 'daemon'):
+                main.daemon.handle_outgoing_call(number)
+                
+            return True
+        except Exception as e:
+            logging.getLogger('LinphoneDaemon').error(f"Call error: {e}")
+            return False
+
+
+    @dbus.service.method('org.sailfishos.LinphoneUI', out_signature='b')
+    def check_registration_status(self):
+        """Force check and update registration status"""
+        try:
+            if self.daemon:
+                self.daemon.check_and_update_registration_status(force_update=True)
+                return True
+            else:
+                logging.getLogger('LinphoneDaemon').error("Daemon instance not available")
+                return False
+        except Exception as e:
+            logging.getLogger('LinphoneDaemon').error(f"Status check error: {e}")
+            return False
+    
+    @dbus.service.method('org.sailfishos.LinphoneUI', out_signature='s')
+    def get_registration_status(self):
+        """Get current registration status as string"""
+        try:
+            if self.daemon:
+                status_output = self.daemon.check_linphone_status()
+                return status_output
+            else:
+                return "Daemon not available"
+        except Exception as e:
+            logging.getLogger('LinphoneDaemon').error(f"Get status error: {e}")
+            return f"Error: {e}"
+    
+    @dbus.service.method('org.sailfishos.LinphoneUI', out_signature='b')
+    def is_registered(self):
+        """Check if currently registered to SIP"""
+        try:
+            if self.daemon:
+                return self.daemon.is_registered
+            else:
+                return False
+        except Exception as e:
+            logging.getLogger('LinphoneDaemon').error(f"Registration check error: {e}")
+            return False
+    
+    @dbus.service.method('org.sailfishos.LinphoneUI', out_signature='s')
+    def get_current_call_info(self):
+        """Get information about current call"""
+        try:
+            if self.daemon:
+                calls_output = self.daemon.check_linphone_calls()
+                call_info = self.daemon.parse_linphone_calls(calls_output)
+                
+                if call_info['has_call']:
+                    return f"Call: {call_info['number']} ({call_info['call_type']})"
+                else:
+                    return "No active call"
+            else:
+                return "Daemon not available"
+        except Exception as e:
+            logging.getLogger('LinphoneDaemon').error(f"Call info error: {e}")
+            return f"Error: {e}"
+    
+    @dbus.service.method('org.sailfishos.LinphoneUI', out_signature='b')
+    def restart_linphone(self):
+        """Restart linphone service"""
+        try:
+            self._log_call_action("Restarting linphone service")
+            if self.daemon:
+                self.daemon.shutdown()
+                time.sleep(2)
+                self.daemon.start_linphone()
+                return True
+            else:
+                return False
+        except Exception as e:
+            logging.getLogger('LinphoneDaemon').error(f"Restart error: {e}")
+            return False
     
     def _log_call_action(self, message):
         logging.getLogger('LinphoneDaemon').info(message)
     
     def emit_call_state(self, state, number):
-        self.call_state_changed(state, number)
+        """Send call state change signal"""
+        try:
+            self.call_state_changed(state, str(number))  # Убедитесь, что number это строка
+            logging.getLogger('LinphoneDaemon').info(f"Emitted call state signal: {state}, {number}")
+        except Exception as e:
+            logging.getLogger('LinphoneDaemon').error(f"Error emitting call state: {e}")
     
     def emit_registration_state(self, registered):
-        self.registration_state_changed(registered)
+        """Send registration state change signal"""
+        try:
+            self.registration_state_changed(registered)
+            logging.getLogger('LinphoneDaemon').info(f"Emitted registration state signal: {registered}")
+        except Exception as e:
+            logging.getLogger('LinphoneDaemon').error(f"Error emitting registration state: {e}")
 
 
 def main():

@@ -9,18 +9,16 @@ ApplicationWindow {
     initialPage: Component { MainPage { } }
     cover: Qt.resolvedUrl("cover/CoverPage.qml")
     
-    // This will be called when the app is launched by the daemon for incoming calls
     function showIncomingCall(number) {
-        // If app is not active, bring it to foreground
+        console.log("Incoming call received in ApplicationWindow:", number)
+        
         if (!app.applicationActive) {
+            console.log("Activating application for incoming call")
             app.activate()
         }
         
-        // Navigate to call page
-        pageStack.push(Qt.resolvedUrl("pages/CallPage.qml"), {
-            callState: "incoming",
-            phoneNumber: number
-        })
+        // Navigation is now handled within MainPage via D-Bus signals
+        // No need to push CallPage since everything is in MainPage
     }
     
     Component.onCompleted: {
