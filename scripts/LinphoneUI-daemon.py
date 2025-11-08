@@ -14,9 +14,52 @@ from dbus.mainloop.glib import DBusGMainLoop
 import gi
 gi.require_version('GLib', '2.0')
 from gi.repository import GLib
+    
+
+class LinphoneOneState:
+    def __init__(self, console_state, script_state, func):
+        self.console_state = console_state
+        self.state = script_state
+        self.exec = func
+
+class LinphoneStates:
+    def __init__(self):
+        self.__states = []
+    
+    def AddState(self, console_state, script_state, func):
+        state = LinphoneOneState(console_state, script_state, func)
+        self.__setattr__(script_state, state)
+        self.__states.append(state)
+    
+    def GetAllScrStates(self):
+        return [state.state for state in self.__states]
+        
+    def GetAllConStates(self):
+        return [state.console_state for state in self.__states]
+    
+    def GetAllExec(self):
+        return [state.exec for state in self.__states]
+    
+    def GetExecByScrState(self, script_state=''):
+        script_states = self.GetAllScrStates()
+        execs = self.GetAllExec()
+        if script_state not in script_states: return None
+        return execs[script_states.index(script_state)]
+    
+    def GetScrStateByConState(self, console_state=''):
+        script_states = self.GetAllScrStates()
+        console_states = self.GetAllConStates()
+        if console_state not in console_states: return None
+        return script_states[console_states.index(console_state)]
 
 class LinphoneDaemon:
     def __init__(self):
+        self.states = LinphoneStates()
+        self.states.AddState("IncomingReceived", "incoming", self.handle_incoming_call)
+        self.states.AddState("OutgoingRinging" , "outgoing", self.handle_outgoing_call)
+        self.states.AddState("StreamsRunning"  , "active"  , self.handle_call_connected)
+        
+
         self.setup_logging()
         self.running = True
         self.in_call = False
@@ -77,6 +120,11 @@ class LinphoneDaemon:
                 check=True, timeout=15, capture_output=True, text=True
             )
             
+            #result = subprocess.run(
+            #    ['env', 'PULSE_PROP_media.role=phone', 'PULSE_PROP_policy.group=internal', 'linphonecsh', 'init', '-c', str(config_path)], 
+            #    check=True, timeout=15, capture_output=True, text=True
+            #)
+            
             self.linphone_started = True
             self.logger.info(f"Linphone started successfully")
             self.logger.debug(f"Linphone init output: {result.stdout}")
@@ -85,7 +133,7 @@ class LinphoneDaemon:
             time.sleep(3)
             
             # Check initial status and force update WITH SIGNAL EMISSION
-            self.check_and_update_registration_status(force_update=True)
+            self.check_and_update_registration_status(force_update=False)
             
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Linphone start error: {e}")
@@ -149,7 +197,7 @@ class LinphoneDaemon:
         
         self.is_registered = self.parse_registration_status(reg_output)
         
-        self.logger.info(f"Registration check: was={was_registered}, now={self.is_registered}, output='{reg_output}'")
+        #self.logger.info(f"Registration check: was={was_registered}, now={self.is_registered}, output='{reg_output}'")
         
         if self.is_registered:
             if not was_registered or force_update:
@@ -205,13 +253,9 @@ class LinphoneDaemon:
                     call_info['call_id'] = call_id
                     call_info['number'] = number
                     
-                    if status == "IncomingReceived":
-                        call_info['call_type'] = 'incoming'
-                    elif status == "OutgoingRinging":
-                        call_info['call_type'] = 'outgoing'
-                    elif status == "StreamsRunning":
-                        call_info['call_type'] = 'active'
-                    else: continue
+                    state = self.states.GetScrStateByConState(status)
+                    if not state: continue
+                    call_info['call_type'] = state
                     break
                     
         except Exception as e:
@@ -265,6 +309,10 @@ class LinphoneDaemon:
         except Exception as e:
             self.logger.error(f"Audio restore error: {e}")
     
+    def setMicHandler(self, micState):
+        tolog = "Mic" + "ON" if micState else "OFF"
+        self.logger.info(tolog)
+    
     def handle_incoming_call(self, number):
         """Handle incoming call"""
         self.logger.info(f"Incoming call: {number}")
@@ -314,48 +362,45 @@ class LinphoneDaemon:
 
     def monitor_linphone(self):
         """Main monitoring loop"""
-        while self.running:
-            try:
-                if not self.linphone_started:
-                    self.logger.warning("Linphone not started, skipping monitoring cycle")
-                    time.sleep(5)
-                    continue
-                
-                # Check registration status
-                self.check_and_update_registration_status()
-                
-                # Check current calls
-                calls_output = self.check_linphone_calls()
-                call_info = self.parse_linphone_calls(calls_output)
-                
-                # Handle call state changes
-                if call_info['has_call']:
-                    if not self.in_call:
-                        # New call detected
-                        self.in_call = True
-                        self.current_call_number = call_info['number']
-                        
-                        if call_info['call_type'] == 'incoming':
-                            self.handle_incoming_call(self.current_call_number)
-                        elif call_info['call_type'] == 'outgoing':
-                            self.handle_outgoing_call(self.current_call_number)
-                        elif call_info['call_type'] == 'active':
-                            self.handle_call_connected(self.current_call_number)
+        #while self.running:
+        try:
+            if not self.linphone_started:
+                self.logger.warning("Linphone not started, skipping monitoring cycle")
+                time.sleep(5)
+                #continue
+            
+            # Check registration status
+            self.check_and_update_registration_status()
+            
+            # Check current calls
+            calls_output = self.check_linphone_calls()
+            call_info = self.parse_linphone_calls(calls_output)
+            
+            # Handle call state changes
+            if call_info['has_call']:
+                if not self.in_call:
+                    # New call detected
+                    self.in_call = True
+                    self.current_call_number = call_info['number']
                     
-                    else:
-                        # Existing call changed state
-                        if call_info['call_type'] == 'active' and self.current_call_number:
-                            # Call became active
-                            self.handle_call_connected(self.current_call_number)
-                        
-                elif not call_info['has_call'] and self.in_call:
-                    # Call ended
-                    self.handle_call_ended()
-                
-            except Exception as e:
+                    self.states.GetExecByScrState(call_info['call_type'])(self.current_call_number)
+
+                else:
+                    # Existing call changed state
+                    if call_info['call_type'] == self.states.active.state and self.current_call_number:
+                        # Call became active
+                        self.states.active.exec(self.current_call_number)
+                    
+            elif not call_info['has_call'] and self.in_call:
+                # Call ended
+                self.handle_call_ended()
+            
+        except Exception as e:
                 self.logger.error(f"Monitoring error: {e}")
             
-            time.sleep(1)
+            # Move from Thread to Timer
+            #time.sleep(self.check_timer)
+        return True
     
     def shutdown(self):
         """Clean shutdown"""
@@ -428,29 +473,6 @@ class LinphoneDBusObject(dbus.service.Object):
         except Exception as e:
             logging.getLogger('LinphoneDaemon').error(f"Answer error: {e}")
             return False
-
-
-    @dbus.service.method('org.sailfishos.LinphoneUI', in_signature='s', out_signature='b')
-    def make_call(self, number):
-        """Make call using linphonecsh"""
-        try:
-            self._log_call_action(f"Making call to {number}")
-            result = subprocess.run(
-                ['linphonecsh', 'dial', number], 
-                check=True, timeout=10, capture_output=True, text=True
-            )
-            self._log_call_action(f"Call result: {result.stdout}")
-            
-            # Notify about outgoing call initiation
-            import __main__ as main
-            if hasattr(main, 'daemon'):
-                main.daemon.handle_outgoing_call(number)
-                
-            return True
-        except Exception as e:
-            logging.getLogger('LinphoneDaemon').error(f"Call error: {e}")
-            return False
-
 
     @dbus.service.method('org.sailfishos.LinphoneUI', out_signature='b')
     def check_registration_status(self):
@@ -525,6 +547,14 @@ class LinphoneDBusObject(dbus.service.Object):
             logging.getLogger('LinphoneDaemon').error(f"Restart error: {e}")
             return False
     
+    @dbus.service.method('org.sailfishos.LinphoneUI', in_signature='b')
+    def setMic(self, isMicON):
+        """Change microphone state"""
+        try:
+            self.daemon.setMicHandler(isMicON)
+        except Exception as e:
+            logging.getLogger('LinphoneDaemon').error(f"Mic change error: {e}")
+    
     def _log_call_action(self, message):
         logging.getLogger('LinphoneDaemon').info(message)
     
@@ -559,9 +589,8 @@ def main():
     try:
         daemon = LinphoneDaemon()
         
-        # Start monitoring in background thread
-        monitor_thread = threading.Thread(target=daemon.monitor_linphone, daemon=True)
-        monitor_thread.start()
+        interval = 1.0 #sec
+        GLib.timeout_add_seconds(interval, daemon.monitor_linphone)
         
         # Start GLib main loop
         loop = GLib.MainLoop()

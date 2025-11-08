@@ -14,6 +14,18 @@ Page {
     property string callDuration: ""
     property var callStartTime: null
     property string lastStatusCheck: "Never"
+    property bool isMicON: true
+    property bool isSpeaker: false
+    
+    // Вычисляемые свойства для автоматического обновления UI
+    property string callStatusText: {
+        if (callState === "incoming") return "Incoming: " + currentCallNumber + " (" + callDuration + ")"
+        if (callState === "outgoing") return "Calling: " + currentCallNumber + " (" + callDuration + ")"
+        if (callState === "active") return "Active: " + currentCallNumber + " (" + callDuration + ")"
+        return "No calls"
+    }
+    
+    property string endCallButtonText: callState === "incoming" ? "Answer Call" : "End Call"
     
     DBusInterface {
         id: linphoneService
@@ -21,6 +33,7 @@ Page {
         path: '/LinphoneUI'
         iface: 'org.sailfishos.LinphoneUI'
         
+		/*
         signal call_state_changed(string state, string number)
         signal registration_state_changed(bool registered)
         
@@ -30,6 +43,7 @@ Page {
             call_state_changed.connect(handleCallStateChanged)
             registration_state_changed.connect(handleRegistrationStateChanged)
         }
+		*/
     }
     
     ConfigurationGroup {
@@ -41,23 +55,23 @@ Page {
     // Timer for automatic status checking
     Timer {
         id: statusCheckTimer
-        interval: 3000 // Check every 3 seconds
+        interval: 1000
         repeat: true
         running: true
         onTriggered: {
-            console.log("GUI: Auto-checking status...")
+            //console.log("GUI: Auto-checking status...")
             autoCheckStatus()
         }
     }
-    
-    // Timer for call duration
-    Timer {
-        id: callDurationTimer
-        interval: 1000
+	
+	Timer {
+        id: focusing_numberField
+        interval: 100
         repeat: true
-        running: callState === "active"
-        onTriggered: updateCallDuration()
-        onRunningChanged: console.log("GUI: Call duration timer running:", running)
+        running: true
+        onTriggered: {
+			numberField.forceActiveFocus()
+        }
     }
     
     SilicaFlickable {
@@ -65,14 +79,6 @@ Page {
         contentHeight: contentColumn.height
         
         PullDownMenu {
-            MenuItem {
-                text: "Refresh Status"
-                onClicked: checkRegistrationStatus()
-            }
-            MenuItem {
-                text: "Check Call State"
-                onClicked: checkCurrentCallState()
-            }
             MenuItem {
                 text: "Clear History"
                 onClicked: clearCallHistory()
@@ -86,16 +92,6 @@ Page {
             
             PageHeader {
                 title: "Linphone"
-            }
-            
-            // Auto-check info
-            Label {
-                width: parent.width - 2*Theme.horizontalPageMargin
-                x: Theme.horizontalPageMargin
-                horizontalAlignment: Text.AlignHCenter
-                text: "Last auto-check: " + lastStatusCheck
-                color: Theme.secondaryColor
-                font.pixelSize: Theme.fontSizeTiny
             }
             
             // Registration status
@@ -118,40 +114,24 @@ Page {
                         color: isRegistered ? Theme.primaryColor : Theme.errorColor
                         font.pixelSize: Theme.fontSizeSmall
                     }
-                    
+                    /*
                     BusyIndicator {
                         size: BusyIndicatorSize.Small
                         running: statusCheckTimer.running
                         visible: running
                     }
+					*/
                 }
             }
             
-            // Current call info
             Label {
                 width: parent.width - 2*Theme.horizontalPageMargin
                 x: Theme.horizontalPageMargin
                 horizontalAlignment: Text.AlignHCenter
-                text: {
-                    if (callState === "incoming") return "Incoming: " + currentCallNumber
-                    if (callState === "outgoing") return "Calling: " + currentCallNumber
-                    if (callState === "active") return "Active: " + currentCallNumber + " (" + callDuration + ")"
-                    return ""
-                }
+                text: callStatusText
                 color: Theme.highlightColor
                 font.pixelSize: Theme.fontSizeMedium
-                visible: callState !== "none"
-            }
-            
-            // Debug info
-            Label {
-                width: parent.width - 2*Theme.horizontalPageMargin
-                x: Theme.horizontalPageMargin
-                text: debugInfo
-                color: Theme.secondaryColor
-                font.pixelSize: Theme.fontSizeSmall
-                wrapMode: Text.Wrap
-                horizontalAlignment: Text.AlignHCenter
+                visible: true
             }
             
             // Number input
@@ -165,16 +145,19 @@ Page {
                 placeholderText: "Enter phone number"
                 label: "Phone Number"
                 inputMethodHints: Qt.ImhDialableCharactersOnly
-                
+                focus: true
                 EnterKey.iconSource: "image://theme/icon-m-call"
                 EnterKey.onClicked: {
-                    if (text.length > 0) {
-                        makeCall(text)
-                    }
+                    if ( (callState === "none") && (text.length > 0) ) makeCall(text)
+                    else if (callState === "incoming") answerCall()
+                    else if (callState === "active") endCall()
+                    else if (callState === "outgoing") endCall()
                 }
+                
             }
             
             // Dial pad
+			/*
             Grid {
                 width: parent.width - 2*Theme.horizontalPageMargin
                 x: Theme.horizontalPageMargin
@@ -201,31 +184,25 @@ Page {
                     }
                 }
             }
+			*/
             
             // Call buttons
-            Column {
+            Row {
                 width: parent.width - 2*Theme.horizontalPageMargin
                 x: Theme.horizontalPageMargin
                 spacing: Theme.paddingSmall
                 
                 Button {
-                    width: parent.width
-                    text: "Make Call"
-                    enabled: isRegistered && numberField.text.length > 0 && callState === "none"
-                    onClicked: {
-                        if (numberField.text.length > 0) {
-                            makeCall(numberField.text)
-                        }
-                    }
+                    width: 0.5*parent.width
+                    text: isMicON ? "Mic: ON" : "Mic: OFF"
+                    enabled: callState === "active"
+                    onClicked: micChange()
                 }
-                
+
                 Button {
-                    width: parent.width
-                    text: {
-                        if (callState === "incoming") return "Answer Call"
-                        else return "End Call"
-                    }
-                    visible: callState !== "none"
+                    width: 0.5*parent.width
+                    text: isSpeaker ? "Out: Speaker" : "Out: Earpiece"
+                    enabled: callState === "active"
                     onClicked: {
                         if (callState === "incoming") {
                             answerCall()
@@ -234,7 +211,9 @@ Page {
                         }
                     }
                 }
+            
             }
+        
             
             // Warning if not registered
             Label {
@@ -323,14 +302,17 @@ Page {
     }
     
     function updateCallDuration() {
-        console.log("GUI: updateCallDuration called, callState:", callState, "callStartTime:", callStartTime)
-        if (callStartTime && callState === "active") {
+        //console.log("GUI: updateCallDuration called, callState:", callState, "callStartTime:", callStartTime)
+        if (callStartTime && callState !== "none") {
             var now = new Date()
             var diff = Math.floor((now - callStartTime) / 1000)
             var minutes = Math.floor(diff / 60)
             var seconds = diff % 60
             callDuration = minutes + ":" + (seconds < 10 ? "0" : "") + seconds
-            console.log("GUI: Call duration updated to:", callDuration)
+            //console.log("GUI: Call duration updated to:", callDuration)
+            
+            // Принудительно обновляем UI после изменения callDuration
+            //callStatusTextChanged()
         }
     }
     
@@ -339,107 +321,100 @@ Page {
     }
     
     function autoCheckStatus() {
-        console.log("GUI: Auto-checking registration and call state...")
-        
+        //console.log("GUI: Auto-checking registration and call state...")
         // Check registration status
+
         linphoneService.call('is_registered', [], function(registeredResult) {
-            console.log("GUI: Auto-check registered:", registeredResult)
+            //console.log("GUI: Auto-check registered:", registeredResult)
             isRegistered = registeredResult
             
             // Check current call state
             linphoneService.call('get_current_call_info', [], function(callInfo) {
-                console.log("GUI: Auto-check call info:", callInfo)
-                
+                //console.log("GUI: Auto-check call info:", callInfo)
+
                 // Update debug info
                 debugInfo = "Auto: reg=" + registeredResult + " call=" + callInfo
                 updateStatusTime()
+				
+				
                 
                 // If we think there's no call but daemon reports one, sync state
-                if (callState === "none" && callInfo !== "No active call" && callInfo !== "Daemon not available") {
-                    console.log("GUI: Auto-check detected missed call state:", callInfo)
-                    debugInfo = "Missed call state: " + callInfo
-                    
-                    // Try to parse call info and update state
-                    if (callInfo.includes("Outgoing")) {
-                        callState = "outgoing"
-                        currentCallNumber = extractNumberFromCallInfo(callInfo)
-                    } else if (callInfo.includes("active")) {
-                        callState = "active"
-                        currentCallNumber = extractNumberFromCallInfo(callInfo)
-                        callStartTime = new Date()
-                    }
+                //if (0 && callState === "none" && callInfo !== "No active call" && callInfo !== "Daemon not available") {
+                if (callInfo !== "Daemon not available") {
+					callInfoHandler(callInfo)
                 }
             })
         })
     }
-    
-    function extractNumberFromCallInfo(callInfo) {
-        // Simple extraction from "Call: 1010 (outgoing)" format
-        var match = callInfo.match(/Call:\s*([^\s\(]+)/)
-        return match ? match[1] : "Unknown"
-    }
-    
-    function checkRegistrationStatus() {
-        linphoneService.call('check_registration_status', [], function(result) {
-            debugInfo = "Manual check: " + result
-            updateStatusTime()
-        })
-    }
-    
-    function checkCurrentCallState() {
-        linphoneService.call('get_current_call_info', [], function(result) {
-            debugInfo = "Call state: " + result
-            updateStatusTime()
-        })
-    }
-    
+	
+	function callInfoHandler(callInfo) {
+		var status = callInfo.match(/\(([^)]+)\)$/)
+		status = status ? status[1] : "none"
+		//if (callState==="outgoing" && status==="active") callStartTime = new Date()
+		if (callState!==status) {
+			callStartTime = new Date()
+			callState = status
+		}
+		
+		var number = callInfo.match(/Call:\s*([^\s\(]+)/)
+		number = number ? number[1] : "Unknown"
+		
+		if (status!=="none") {
+			currentCallNumber = number
+			updateCallDuration()
+		}
+		
+		//console.log("GUI: callInfoHandler:", status, number)
+	}
+	
+	function makeCallHandler(result) {
+		console.log("GUI: make_call result:", result)
+		if (result) {
+			callState = "outgoing"
+			numberField.text = ""
+			callStartTime = new Date()
+		}
+	}
+
     function makeCall(number) {
-        if (!isRegistered) {
-            debugInfo = "Call failed: not registered"
-            return
-        }
-        
-        if (callState !== "none") {
-            debugInfo = "Another call in progress"
-            return
-        }
-        
+        if ( (!isRegistered) || (callState !== "none") ) return
         addToHistory(number, "outgoing")
-        
-        linphoneService.call('make_call', [number], function(result) {
-            console.log("GUI: make_call result:", result)
-            if (result) {
-                callState = "outgoing"
-                currentCallNumber = number
-                callStartTime = new Date()
-                numberField.text = ""
-                debugInfo = "Calling " + number
-                console.log("GUI: Set state to 'outgoing' for number:", number)
-            } else {
-                debugInfo = "Call failed"
-            }
-        })
+        linphoneService.call('make_call', [number], makeCallHandler)
+		//currentCallNumber = number
+		//console.log("GUI: Set state to 'outgoing' for number:", number)
     }
+
+	function endCallHandler(result) {
+		callState = "none"
+		console.log("GUI: Hang up result:", result)
+	}
     
     function endCall() {
         console.log("GUI: Ending call, current state:", callState)
-        linphoneService.call('hang_up', [], function(result) {
-            console.log("GUI: Hang up result:", result)
-        })
+        linphoneService.call('hang_up', [], endCallHandler)
     }
-    
+	
+	function answerCallHandler(result) {
+		console.log("GUI: Answer call result:", result)
+		if (result) {
+			callState = "active"
+			callStartTime = new Date()
+			console.log("GUI: Set state to 'active' after answer")
+			
+		}
+	}
+	
     function answerCall() {
         console.log("GUI: Answering call")
-        linphoneService.call('answer_call', [], function(result) {
-            console.log("GUI: Answer call result:", result)
-            if (result) {
-                callState = "active"
-                callStartTime = new Date()
-                console.log("GUI: Set state to 'active' after answer")
-            }
-        })
+        linphoneService.call('answer_call', [], answerCallHandler)
     }
+	
+	function micChange() {
+		console.log("GUI: Mic - " + (isMicON ? "ON" : "OFF") )
+		linphoneService.call('setMic', [isMicON], makeCallHandler)
+	}
     
+	/*
     function handleCallStateChanged(state, number) {
         console.log("GUI: Call state changed - state:'" + state + "', number:'" + number + "', current state:'" + callState + "'")
         
@@ -474,6 +449,11 @@ Page {
         }
         
         updateStatusTime()
+        
+        // Принудительно обновляем UI после изменения состояний
+        //callStateChanged()
+        //currentCallNumberChanged()
+        debugInfoLabel.text = debugInfo // Прямое обновление Label
     }
     
     function handleRegistrationStateChanged(registered) {
@@ -481,7 +461,12 @@ Page {
         isRegistered = registered
         debugInfo = "SIP " + (registered ? "registered" : "not registered")
         updateStatusTime()
+        
+        // Принудительно обновляем UI
+        debugInfoLabel.text = debugInfo
     }
+	*/
+	
     
     function addToHistory(number, type) {
         var timestamp = new Date().toLocaleString(Qt.locale(), "dd.MM.yyyy HH:mm")
@@ -526,6 +511,6 @@ Page {
         loadCallHistory()
         
         // Start auto-check immediately
-        autoCheckStatus()
+        //autoCheckStatus()
     }
 }
